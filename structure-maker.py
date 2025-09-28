@@ -1,65 +1,55 @@
 import streamlit as st
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
-from webdriver_manager.chrome import ChromeDriverManager
+import requests
 from bs4 import BeautifulSoup
 import time
-from selenium_stealth import stealth
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-def fetch_page_info_selenium(url):
-    options = webdriver.ChromeOptions()
-    options.add_argument('--headless=new')  # New headless mode for better compatibility
-    options.add_argument('--disable-gpu')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-blink-features=AutomationControlled')
-    options.add_argument('--disable-extensions')
-    options.add_argument('--disable-plugins')
-    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36')
-    options.add_argument('--window-size=1920,1080')
-    options.add_argument('--remote-debugging-port=9222')  # Fix for Streamlit Cloud
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
+def fetch_page_info_requests(url):
+    session = requests.Session()
+    retry_strategy = Retry(total=3, backoff_factor=2)
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Referer': 'https://www.google.com/',
+        'DNT': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+    }
+
+    # Опція для проксі (розкоментуй і встав проксі, якщо потрібно)
+    proxies = {
+        # 'http': 'http://<proxy_ip>:<port>',
+        # 'https': 'https://<proxy_ip>:<port>'
+    }
 
     try:
-        # Install ChromeDriver with webdriver-manager
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-        
-        # Apply stealth settings
-        stealth(driver,
-                languages=["en-US", "en"],
-                vendor="Google Inc.",
-                platform="Win32",
-                webgl_vendor="Intel Inc.",
-                renderer="Intel Iris OpenGL Engine",
-                fix_hairline=True)
+        time.sleep(1)
+        response = session.get(url, headers=headers, timeout=30, proxies=proxies if proxies else None)
+        response.raise_for_status()
+        time.sleep(2)
 
-        driver.get(url)
-        time.sleep(3)  # Increased delay to allow page to stabilize
-
-        try:
-            WebDriverWait(driver, 30).until(
-                lambda d: all(phrase not in d.page_source.lower() for phrase in [
-                    "just a moment...", "checking your browser", "cloudflare", "captcha", "blocked"
-                ])
-            )
-        except TimeoutException:
-            st.warning(f"Block or timeout detected for {url}")
-            driver.quit()
+        if any(phrase in response.text.lower() for phrase in ['cloudflare', 'captcha', 'blocked', 'just a moment', 'access denied']):
+            st.warning(f"Block detected for {url}: possible anti-bot protection")
             return None
 
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-        driver.quit()
+        soup = BeautifulSoup(response.content, 'html.parser')
 
         headings = []
         for tag in ['h2', 'h3', 'h4']:
             for heading in soup.find_all(tag):
                 text = heading.text.strip()
-                if text and len(text) > 3 and not any(keyword in text.lower() for keyword in ['footer', 'menu', 'nav', 'copyright', 'sign up', 'log in']):
+                if (text and len(text) > 3 and 
+                    not any(keyword in text.lower() for keyword in ['footer', 'menu', 'nav', 'copyright', 'sign up', 'log in'])):
                     headings.append(f"<{tag.upper()}>{text}")
 
         return "\n".join(headings) if headings else None
@@ -80,14 +70,11 @@ def generate_prompt(html_structures):
 Наша структура повинна:
 - Врахувати загальний інтент пошуку: аналізуй спільні теми та послідовність заголовків у конкурентів, щоб відповідати користувацьким запитам.
 - Бути лаконічною: максимум 5-6 H2, H3 лише для ключових підтем (уникай надмірної деталізації, H4 не використовувати).
-- Починатися з H1 (унікальний, але натхненний конкурентами).
+- Починатися з H2 (без H1).
 - Мати логічну послідовність: вступ, основний контент, висновок, за потреби FAQ.
 - Бути SEO-оптимізованою: природне включення ключових слів, привабливі заголовки, чітка ієрархія.
 - Уникати дублювання: об'єднуй схожі теми, залишай лише найважливіше.
 - Формат:
-  H1: [Заголовок]
-  Опис: [Короткий опис]
-
   H2: [Підзаголовок]
   Опис: [Короткий опис]
 
@@ -98,6 +85,45 @@ def generate_prompt(html_structures):
 """
     return prompt
 
+def generate_default_prompt():
+    return """
+Створи компактну та оптимізовану SEO-структуру для тексту копірайтингу на тему "онлайн-казино без верифікації".
+
+Наша структура повинна:
+- Бути лаконічною: максимум 5-6 H2, H3 лише для ключових підтем (уникай надмірної деталізації, H4 не використовувати).
+- Починатися з H2 (без H1).
+- Мати логічну послідовність: вступ, основний контент, висновок, за потреби FAQ.
+- Бути SEO-оптимізованою: природне включення ключових слів (наприклад, "казино без верифікації", "анонімні казино"), привабливі заголовки, чітка ієрархія.
+- Уникати дублювання: об'єднуй схожі теми, залишай лише найважливіше.
+- Формат:
+  H2: [Підзаголовок]
+  Опис: [Короткий опис]
+
+  H3: [Підпідзаголовок, якщо потрібно]
+  Опис: [Короткий опис]
+
+Приклад структури:
+  H2: Що таке казино без верифікації
+  Опис: Визначення та особливості казино без підтвердження особи.
+
+  H2: Переваги гри без верифікації
+  Опис: Швидкість, анонімність, простота.
+
+  H2: Ризики та обмеження
+  Опис: Потенційні проблеми з безпекою та лімітами.
+
+  H2: Методи платежів
+  Опис: Огляд криптовалют, карток, гаманців.
+
+  H2: Як обрати надійне казино
+  Опис: Критерії вибору: ліцензія, відгуки.
+
+  H2: FAQ
+  Опис: Відповіді на часті запитання про казино без верифікації.
+
+Згенеруй структуру, яка буде релевантною, компактною та оптимізованою для SEO.
+"""
+
 st.title("Парсер HTML-структур конкурентів")
 
 urls_input = st.text_area("Вставте URLи (один в лінію):", height=200)
@@ -106,7 +132,7 @@ if st.button("Перевірити конкурентів"):
     urls = [url.strip() for url in urls_input.split("\n") if url.strip()]
     html_structures = []
     for url in urls:
-        structure = fetch_page_info_selenium(url)
+        structure = fetch_page_info_requests(url)
         if structure:
             html_structures.append(structure)
     
@@ -122,3 +148,5 @@ if st.button("Перевірити конкурентів"):
         st.text_area("Копіюйте звідси:", st.session_state['prompt'], height=400)
     else:
         st.error("Не вдалося спарсити жодного конкурента. Можливо, сайти захищені від парсингу.")
+        st.subheader("Базовий промпт для ТЗ:")
+        st.text_area("Копіюйте звідси:", generate_default_prompt(), height=400)
