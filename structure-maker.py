@@ -1,48 +1,50 @@
 import streamlit as st
 import pyperclip
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
-from webdriver_manager.chrome import ChromeDriverManager
+import requests
 from bs4 import BeautifulSoup
 import traceback
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-def fetch_page_info_selenium(url):
-    options = webdriver.ChromeOptions()
-    options.add_argument('--headless')
-    options.add_argument('--disable-gpu')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-blink-features=AutomationControlled')
+def fetch_page_info_requests(url):
+    session = requests.Session()
+    retry_strategy = Retry(total=3, backoff_factor=1)
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
 
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+    }
+    
     try:
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-        driver.get(url)
+        response = session.get(url, headers=headers, timeout=20)
+        response.raise_for_status()
         
-        try:
-            WebDriverWait(driver, 20).until(
-                lambda d: "Just a moment..." not in d.page_source and 
-                          "Checking your browser before accessing" not in d.page_source
-            )
-        except TimeoutException:
-            driver.quit()
-            return None  # Повертаємо None, якщо помилка завантаження
+        if any(phrase in response.text.lower() for phrase in ['cloudflare', 'captcha', 'blocked', 'just a moment']):
+            st.write(f"Block detected for {url}")
+            return None
 
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-        driver.quit()
+        soup = BeautifulSoup(response.content, 'lxml')
 
         headings = []
         for tag in ['h2', 'h3', 'h4']:
             for heading in soup.find_all(tag):
-                headings.append(f"<{tag.upper()}>{heading.text.strip()}")
+                text = heading.text.strip()
+                # Фільтр: тільки заголовки довші за 3 символи, без "сміття" (навігація, футери)
+                if text and len(text) > 3 and not any(keyword in text.lower() for keyword in ['footer', 'menu', 'nav', 'copyright', 'sign up']):
+                    headings.append(f"<{tag.upper()}>{text}")
 
         return "\n".join(headings) if headings else None
 
     except Exception as e:
-        return None  # Повертаємо None у разі будь-якої помилки
+        st.write(f"Error for {url}: {str(e)}")
+        return None
 
 def generate_prompt(html_structures):
     competitors_structures = "\n\n".join([f"Конкурент {i+1}:\n{structure}" for i, structure in enumerate(html_structures)])
@@ -86,7 +88,7 @@ if st.button("Перевірити конкурентів"):
     urls = [url.strip() for url in urls_input.split("\n") if url.strip()]
     html_structures = []
     for url in urls:
-        structure = fetch_page_info_selenium(url)
+        structure = fetch_page_info_requests(url)
         if structure:
             html_structures.append(structure)
     
@@ -103,9 +105,11 @@ if 'output_structures' in st.session_state:
     if st.button("Скопіювати HTML-структури"):
         pyperclip.copy(st.session_state['output_structures'])
         st.success("HTML-структури скопійовано в буфер обміну!")
+        st.info("У веб-версії Streamlit копіювання може не працювати. Виділіть текст і скопіюйте вручну (Cmd+C).")
 
     if st.button("Скопіювати промт"):
         pyperclip.copy(st.session_state['prompt'])
         st.success("Промт скопійовано в буфер обміну!")
+        st.info("У веб-версії Streamlit копіювання може не працювати. Виділіть текст і скопіюйте вручну (Cmd+C).")
 
-st.info("Ця програма розгорнута на Streamlit. Для релізу на streamlit.app, завантажте цей код на GitHub і налаштуйте репозиторій для Streamlit sharing.")
+st.info("Ця програма розгорнута на Streamlit. Для релізу на streamlit.io, завантажте цей код і requirements.txt на GitHub.")
