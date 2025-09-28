@@ -3,3 +3,4 @@ selenium
 beautifulsoup4
 pyperclip
 webdriver-manager
+urllib3
