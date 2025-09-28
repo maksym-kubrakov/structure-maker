@@ -11,7 +11,7 @@ from selenium_stealth import stealth
 
 def fetch_page_info_selenium(url):
     options = webdriver.ChromeOptions()
-    options.add_argument('--headless')
+    options.add_argument('--headless=new')  # New headless mode for better compatibility
     options.add_argument('--disable-gpu')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
@@ -20,11 +20,16 @@ def fetch_page_info_selenium(url):
     options.add_argument('--disable-plugins')
     options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36')
     options.add_argument('--window-size=1920,1080')
+    options.add_argument('--remote-debugging-port=9222')  # Fix for Streamlit Cloud
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
 
     try:
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        # Install ChromeDriver with webdriver-manager
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        
+        # Apply stealth settings
         stealth(driver,
                 languages=["en-US", "en"],
                 vendor="Google Inc.",
@@ -34,8 +39,8 @@ def fetch_page_info_selenium(url):
                 fix_hairline=True)
 
         driver.get(url)
-        time.sleep(2)  # Затримка перед перевіркою
-        
+        time.sleep(3)  # Increased delay to allow page to stabilize
+
         try:
             WebDriverWait(driver, 30).until(
                 lambda d: all(phrase not in d.page_source.lower() for phrase in [
