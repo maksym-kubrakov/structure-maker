@@ -1,5 +1,4 @@
 streamlit
-selenium==4.15.2
+requests
 beautifulsoup4
-webdriver-manager
-selenium-stealth
+urllib3
