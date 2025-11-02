@@ -1,177 +1,204 @@
 import streamlit as st
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
+import requests
 from bs4 import BeautifulSoup
 import time
 import os
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 
-# === Налаштування Selenium для Streamlit Cloud ===
-def get_driver():
-    chrome_options = Options()
-    chrome_options.add_argument('--headless')
-    chrome_options.add_argument('--no-sandbox')
-    chrome_options.add_argument('--disable-dev-shm-usage')
-    chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--window-size=1920,1080')
-    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-    chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36')
-
-    # Для Streamlit Cloud — використовуємо webdriver-manager
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    
-    # Приховуємо, що це автоматизація
-    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => false});")
-    return driver
-
-# === Парсинг сторінки через Selenium ===
-def fetch_page_info_selenium(url):
-    driver = None
+# === Перевірка: чи є Selenium доступний (тільки локально) ===
+def is_selenium_available():
     try:
-        driver = get_driver()
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+        from selenium.webdriver.chrome.options import Options
+        return True
+    except:
+        return False
+
+# === Selenium парсер (тільки локально) ===
+def fetch_with_selenium(url):
+    if not is_selenium_available():
+        return None
+
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from webdriver_manager.chrome import ChromeDriverManager
+
+    options = Options()
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36')
+
+    try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => false});")
         driver.get(url)
 
-        # Чекаємо, поки завантажиться хоча б body
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
-        time.sleep(3)  # Додаткова пауза для JS
+        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        time.sleep(3)
 
-        page_source = driver.page_source
-        soup = BeautifulSoup(page_source, 'html.parser')
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        driver.quit()
 
-        # Перевірка на блокування
-        page_text = page_source.lower()
-        if any(phrase in page_text for phrase in ['cloudflare', 'captcha', 'blocked', 'just a moment', 'access denied']):
-            st.warning(f"Блокування виявлено для {url} (Cloudflare/антибот)")
+        return extract_headings(soup, url)
+    except Exception as e:
+        st.warning(f"Selenium помилка ({url}): {str(e)[:80]}...")
+        return None
+
+# === Requests парсер (працює на Streamlit Cloud) ===
+def fetch_with_requests(url):
+    session = requests.Session()
+    retry = Retry(total=3, backoff_factor=2, status_forcelist=[500, 502, 503, 504, 429])
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0',
+    }
+
+    try:
+        time.sleep(1.5)
+        response = session.get(url, headers=headers, timeout=20, allow_redirects=True)
+        response.raise_for_status()
+
+        # Антибот перевірка
+        text = response.text.lower()
+        if any(block in text for block in ['cloudflare', 'captcha', 'blocked', 'just a moment', 'access denied', 'checking your browser']):
+            st.warning(f"Cloudflare/антибот для {url}")
             return None
 
-        headings = []
-        for tag in ['h2', 'h3', 'h4']:
-            for heading in soup.find_all(tag):
-                text = heading.text.strip()
-                if (text and len(text) > 3 and 
-                    not any(keyword in text.lower() for keyword in ['footer', 'menu', 'nav', 'copyright', 'sign up', 'log in', 'cookie'])):
-                    headings.append(f"<{tag.upper()}>{text}")
-
-        return "\n".join(headings) if headings else "No relevant headings found"
+        soup = BeautifulSoup(response.content, 'html.parser')
+        return extract_headings(soup, url)
 
     except Exception as e:
-        st.warning(f"Помилка для {url}: {str(e)[:100]}...")
+        st.warning(f"Requests помилка ({url}): {str(e)[:80]}...")
         return None
-    finally:
-        if driver:
-            driver.quit()
+
+# === Витяг заголовків (одна функція для обох методів) ===
+def extract_headings(soup, url):
+    headings = []
+    for tag in ['h2', 'h3', 'h4']:
+        for heading in soup.find_all(tag):
+            text = heading.get_text(strip=True)
+            if (text and len(text) > 3 and
+                not any(kw in text.lower() for kw in ['footer', 'menu', 'nav', 'copyright', 'sign up', 'log in', 'cookie', 'privacy'])):
+                headings.append(f"<{tag.upper()}>{text}")
+    return "\n".join(headings) if headings else "No relevant headings"
+
+# === Універсальний парсер ===
+def fetch_page_info(url):
+    # Спроба 1: Selenium (тільки локально)
+    if os.getenv("STREAMLIT_CLOUD") != "true":  # або просто завжди пробувати
+        result = fetch_with_selenium(url)
+        if result:
+            return result
+
+    # Спроба 2: Requests (завжди)
+    return fetch_with_requests(url)
 
 # === Генерація промпту ===
 def generate_prompt(html_structures):
-    competitors_structures = "\n\n".join([f"Конкурент {i+1}:\n{structure}" for i, structure in enumerate(html_structures)])
-    
-    prompt = f"""
+    competitors = "\n\n".join([f"Конкурент {i+1}:\n{s}" for i, s in enumerate(html_structures)])
+    return f"""
 Створи компактну та оптимізовану SEO-структуру для тексту копірайтингу на основі структур конкурентів.
 
-Конкуренти' структури (враховуй лише релевантні SEO-заголовки з контенту, ігноруй нерелевантні елементи як футери, сайдбари чи навігацію):
-{competitors_structures}
+Конкуренти' структури:
+{competitors}
 
 Наша структура повинна:
-- Врахувати загальний інтент пошуку: аналізуй спільні теми та послідовність заголовків у конкурентів, щоб відповідати користувацьким запитам.
-- Бути лаконічною: максимум 5-6 H2, H3 лише для ключових підтем (H4 можна використовувати, але це буде рідкістю).
-- Починатися з H2 (без H1).
-- Мати логічну послідовність: вступ, основний контент, підсумки.
-- Бути SEO-оптимізованою: природне включення ключових слів, привабливі заголовки, чітка ієрархія.
-- Уникати дублювання: об'єднуй схожі теми, залишай лише найважливіше.
-- Не додавай FAQ
+- Бути лаконічною: максимум 5-6 H2, H3 рідко.
+- Починатися з H2.
+- Логічна послідовність: вступ → основа → підсумок.
+- SEO: природні ключі, привабливі заголовки.
+- Без FAQ, без дублів.
 
-Згенеруй структуру у вигляді таблиці з колонками "Заголовок" і "О чем описать", де заголовки (H2, H3, H4) вказані в рядках.
+Вивід — таблиця:
 
-Приклад таблиці:
-| Заголовок        | О чем описать                    |
-|------------------|-----------------------------------|
-| H2: ……          | ……                               |
-| H2: ……          | ……                               |
-| H3: ……          | ……                               |
-| H3: ……          | ……                               |
-| H2: ……          | ……                               |
-
-Згенеруй таблицю, яка буде релевантною, компактною та кращою за конкурентів за користувацьким досвідом.
+| Заголовок | О чем описать |
+|----------|----------------|
+| H2: ...  | ...            |
+...
 """
-    return prompt
 
 def generate_default_prompt():
     return """
-Створи компактну та оптимізовану SEO-структуру для тексту копірайтингу на тему "онлайн-казино без верифікації".
-
-Наша структура повинна:
-- Бути лаконічною: максимум 5-6 H2, H3 лише для ключових підтем (H4 можна використовувати, але це буде рідкістю).
-- Починатися з H2 (без H1).
-- Мати логічну послідовність: вступ, основний контент, підсумки.
-- Бути SEO-оптимізованою: природне включення ключових слів (наприклад, "казино без верифікації", "анонімні казино"), привабливі заголовки, чітка ієрархія.
-- Уникати дублювання: об'єднуй схожі теми, залишай лише найважливіше.
-
-Згенеруй структуру у вигляді таблиці з колонками "Заголовок" і "О чем описать", де заголовки (H2, H3, H4) вказані в рядках.
-
-Приклад таблиці:
-| Заголовок        | О чем описать                    |
-|------------------|-----------------------------------|
-| <H2> Що таке казино без верифікації | Визначення та особливості казино без підтвердження особи |
-| <H2> Переваги гри без верифікації  | Швидкість, анонімність, простота |
-| <H2> Ризики та обмеження           | Потенційні проблеми з безпекою та лімітами |
-| <H2> Методи платежів               | Огляд криптовалют, карток, гаманців |
-| <H2> Як обрати надійне казино      | Критерії вибору: ліцензія, відгуки |
-| <H2> Підсумки                       | Короткий огляд переваг і ризиків |
+| Заголовок | О чем описать |
+|----------|----------------|
+| <H2> Що таке казино без верифікації | Визначення, як працює, відмінності від звичайних |
+| <H2> Переваги анонімної гри | Швидкість, конфіденційність, доступність |
+| <H2> Ризики та недоліки | Безпека, ліміти, шахрайство |
+| <H2> Як обрати надійне казино | Ліцензія, відгуки, методи оплати |
+| <H2> Підсумок | Кому підходить, основні висновки |
 """
 
 # === Streamlit UI ===
-st.set_page_config(page_title="SEO Структура Конкурентів", layout="wide")
-st.title("Парсер HTML-структур конкурентів (Selenium)")
+st.set_page_config(page_title="SEO Парсер", layout="wide")
+st.title("Парсер структур конкурентів")
 
-st.info("Використовується **Selenium + Chrome** — обходить Cloudflare, JS, антиботи")
+# Авто-детект: чи це Streamlit Cloud
+is_cloud = os.getenv("STREAMLIT_CLOUD") or "streamlit.io" in os.getenv("SERVER_NAME", "")
 
-urls_input = st.text_area("Вставте URLи (один в лінію):", height=200, placeholder="https://example.com/page1\nhttps://example.com/page2")
+if is_cloud:
+    st.warning("На Streamlit Cloud працює **requests** (Selenium недоступний). Для повного парсингу — запускай **локально**.")
+else:
+    st.success("Локальний запуск — використовується **Selenium** (обходить Cloudflare)")
+
+urls_input = st.text_area("Введіть URLи (по одному на рядок):", height=150)
 
 if st.button("Перевірити конкурентів", type="primary"):
-    urls = [url.strip() for url in urls_input.split("\n") if url.strip()]
-    
+    urls = [u.strip() for u in urls_input.split("\n") if u.strip()]
     if not urls:
-        st.error("Введіть хоча б один URL")
+        st.error("Введіть URLи")
+        st.stop()
+
+    results = []
+    progress = st.progress(0)
+    status_container = st.empty()
+
+    for i, url in enumerate(urls):
+        status_container.info(f"Парсимо {i+1}/{len(urls)}: {url}")
+        structure = fetch_page_info(url)
+        if structure:
+            results.append(structure)
+        time.sleep(1)
+        progress.progress((i + 1) / len(urls))
+
+    status_container.empty()
+
+    if results:
+        output = "\n\n".join([f"Конкурент {i+1}:\n{s}" for i, s in enumerate(results)])
+        prompt = generate_prompt(results)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Структури конкурентів")
+            st.code(output, language="text")
+        with col2:
+            st.subheader("Промпт для ТЗ")
+            st.code(prompt, language="markdown")
     else:
-        with st.spinner(f"Парсимо {len(urls)} сайтів..."):
-            html_structures = []
-            successful = 0
-            for i, url in enumerate(urls):
-                with st.status(f"Парсимо {i+1}/{len(urls)}: {url}") as status:
-                    structure = fetch_page_info_selenium(url)
-                    if structure:
-                        html_structures.append(structure)
-                        successful += 1
-                        status.update(label=f"Успішно: {url}", state="complete")
-                    else:
-                        status.update(label=f"Пропущено: {url}", state="error")
-                    time.sleep(1)  # Пауза між запитами
-
-            if html_structures:
-                st.session_state['html_structures'] = html_structures
-                st.session_state['output_structures'] = "\n\n".join([f"Конкурент {i+1}:\n{structure}" for i, structure in enumerate(html_structures)])
-                st.session_state['prompt'] = generate_prompt(html_structures)
-
-                st.success(f"Успішно спаршено {successful} з {len(urls)} сайтів")
-
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    st.subheader("HTML-структури конкурентів:")
-                    st.text_area("Копіюйте звідси:", st.session_state['output_structures'], height=400, key="structures")
-
-                with col2:
-                    st.subheader("Промт для ТЗ:")
-                    st.text_area("Копіюйте звідси:", st.session_state['prompt'], height=400, key="prompt")
-
-            else:
-                st.error("Не вдалося спарсити жодного конкурента.")
-                st.subheader("Базовий промпт для ТЗ:")
-                st.text_area("Копіюйте звідси:", generate_default_prompt(), height=400)
+        st.error("Не вдалося отримати жодної структури.")
+        st.subheader("Базовий шаблон")
+        st.code(generate_default_prompt(), language="markdown")
