@@ -1,3 +1,4 @@
 streamlit
-cloudscraper
+httpx
+fake-useragent
 beautifulsoup4
